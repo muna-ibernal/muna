@@ -1,0 +1,23 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+.vscode/
+*.swp
+
+# Logs
+*.log
+npm-debug.log*
+
+# Vercel
+.vercel/
+
+# Locales con secretos
+.env
+.env.local
+.env.*.local
+
+# No subir respaldo de la versión Next.js descartada (si existiera en el repo)
+muna_DESCARTADO_NEXTJS/
