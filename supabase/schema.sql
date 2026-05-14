@@ -313,3 +313,17 @@ create table if not exists public.suggestions (
   status text default 'pendiente' check (status in ('pendiente','resuelta','desestimada')),
   created_at timestamptz default now()
 );
+
+-- ============================================================
+-- 12. GRANTS (re-aplicados al final por si el schema fue dropeado y
+--     se perdieron los defaults automáticos de Supabase)
+-- ============================================================
+grant usage on schema public to anon, authenticated, service_role;
+grant select on all tables in schema public to anon;
+grant all on all tables in schema public to authenticated;
+grant all on all tables in schema public to service_role;
+grant usage, select on all sequences in schema public to anon, authenticated, service_role;
+grant execute on all functions in schema public to anon, authenticated, service_role;
+
+-- Refrescar el cache de PostgREST para que aplique de inmediato
+notify pgrst, 'reload schema';

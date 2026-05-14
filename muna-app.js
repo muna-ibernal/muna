@@ -5,7 +5,9 @@
  * estructura. Se ejecuta después del script inline del HTML (que ya corrió
  * `init()`), sobreescribe las funciones de prototipo (`login`, `fav`,
  * `submitReview`, etc.) con versiones que hablan con Supabase, y rellena
- * `window.data`, `window.favs`, `window.myPosts`, etc. con datos reales.
+ * `data`, `favs`, `myPosts`, etc. con datos reales (referenciamos las
+ * variables globales del HTML directamente, ya que están declaradas con
+ * `const`/`let` y no son propiedades de `window`).
  *
  * Si muna-config.js NO tiene URL/anon key reales, este archivo no hace
  * nada y el sitio se comporta como el prototipo original (datos simulados).
@@ -61,7 +63,7 @@
       window.renderMyProfiles && window.renderMyProfiles();
   }
 
-  // Convierten filas de DB → forma que el HTML espera en window.data[...]
+  // Convierten filas de DB → forma que el HTML espera en data[...]
   function rowToDirectory(r) {
     return {
       id: r.id,
@@ -193,34 +195,80 @@
 
   async function loadAll() {
     try {
-      const [dir, prod, com, eve, sec] = await Promise.all([
-        sb
-          .from("directory_items")
-          .select("*, reviews(r,t)")
-          .order("created_at", { ascending: false }),
-        sb
-          .from("products")
-          .select("*, reviews(r,t,price,pros,cons)")
-          .order("created_at", { ascending: false }),
-        sb
-          .from("community_items")
-          .select("*, comments(content,created_at)")
-          .order("created_at", { ascending: false }),
-        sb
-          .from("events")
-          .select("*")
-          .order("event_date", { ascending: true }),
-        sb
-          .from("secondhand_items")
-          .select("*")
-          .order("created_at", { ascending: false }),
-      ]);
+      // Cargamos cada tabla por separado (sin embeds) porque las relaciones
+      // entre reviews/comments y los items son polimórficas (target_type +
+      // target_id) y PostgREST no las puede auto-descubrir vía foreign key.
+      const [dir, prod, com, eve, sec, revDir, revProd, comCom, comSh] =
+        await Promise.all([
+          sb
+            .from("directory_items")
+            .select("*")
+            .order("created_at", { ascending: false }),
+          sb
+            .from("products")
+            .select("*")
+            .order("created_at", { ascending: false }),
+          sb
+            .from("community_items")
+            .select("*")
+            .order("created_at", { ascending: false }),
+          sb
+            .from("events")
+            .select("*")
+            .order("event_date", { ascending: true }),
+          sb
+            .from("secondhand_items")
+            .select("*")
+            .order("created_at", { ascending: false }),
+          sb
+            .from("reviews")
+            .select("target_id,r,t")
+            .eq("target_type", "directory"),
+          sb
+            .from("reviews")
+            .select("target_id,r,t,price,pros,cons")
+            .eq("target_type", "products"),
+          sb
+            .from("comments")
+            .select("target_id,content,created_at")
+            .eq("target_type", "community")
+            .order("created_at", { ascending: true }),
+          sb
+            .from("comments")
+            .select("target_id,content,created_at")
+            .eq("target_type", "secondhand")
+            .order("created_at", { ascending: true }),
+        ]);
 
-      if (dir.data) window.data.directory = dir.data.map(rowToDirectory);
-      if (prod.data) window.data.products = prod.data.map(rowToProduct);
-      if (com.data) window.data.community = com.data.map(rowToCommunity);
-      if (eve.data) window.data.events = eve.data.map(rowToEvent);
-      if (sec.data) window.data.secondhand = sec.data.map(rowToSecondhand);
+      const groupBy = (arr, key) => {
+        const out = {};
+        (arr || []).forEach((row) => {
+          (out[row[key]] = out[row[key]] || []).push(row);
+        });
+        return out;
+      };
+      const revDirByTarget = groupBy(revDir.data, "target_id");
+      const revProdByTarget = groupBy(revProd.data, "target_id");
+      const comComByTarget = groupBy(comCom.data, "target_id");
+      // (comSh se usa más adelante al renderizar detalle, opcional aquí)
+
+      if (dir.data)
+        data.directory = dir.data.map((r) =>
+          rowToDirectory({ ...r, reviews: revDirByTarget[r.id] || [] })
+        );
+      if (prod.data)
+        data.products = prod.data.map((r) =>
+          rowToProduct({ ...r, reviews: revProdByTarget[r.id] || [] })
+        );
+      if (com.data)
+        data.community = com.data.map((r) =>
+          rowToCommunity({ ...r, comments: comComByTarget[r.id] || [] })
+        );
+      if (eve.data) data.events = eve.data.map(rowToEvent);
+      if (sec.data) data.secondhand = sec.data.map(rowToSecondhand);
+
+      // Exponer comentarios de segunda mano para el detalle
+      window.muna.shComments = groupBy(comSh.data, "target_id");
     } catch (e) {
       console.warn("[Muna] No se pudieron cargar datos iniciales:", e.message);
     }
@@ -238,8 +286,8 @@
       .select("target_id")
       .eq("user_id", window.muna.session.user.id);
     if (data) {
-      window.favs.clear();
-      data.forEach((row) => window.favs.add(row.target_id));
+      favs.clear();
+      data.forEach((row) => favs.add(row.target_id));
     }
   }
 
@@ -314,7 +362,8 @@
         id: p.id,
       })
     );
-    window.myPosts = out;
+    myPosts.length = 0;
+    out.forEach((p) => myPosts.push(p));
   }
 
   async function loadManaged() {
@@ -325,7 +374,7 @@
       .select("id,title,status,verified")
       .or(`owner_user_id.eq.${uid},claimed_by_user_id.eq.${uid}`);
     if (!data) return;
-    window.managed = data.map((d) => ({
+    const mapped = data.map((d) => ({
       title: d.title,
       status:
         d.status === "pendiente"
@@ -340,6 +389,8 @@
         : "Activa",
       suggestions: "",
     }));
+    managed.length = 0;
+    mapped.forEach((m) => managed.push(m));
   }
 
   /* ============================================================
@@ -367,11 +418,11 @@
           avatar.innerHTML = `<span>${inits}</span>${display}`;
         }
       }
-      window.logged = true;
+      logged = true;
       window.setLogged(true);
     } else {
       window.muna.profile = null;
-      window.logged = false;
+      logged = false;
       window.setLogged(false);
     }
   }
@@ -477,14 +528,14 @@
 
   const originalFav = window.fav;
   window.fav = async function fav(id) {
-    if (!window.logged) {
+    if (!logged) {
       window.needLogin("fav", "Inicia sesión para guardar favoritos.");
       return;
     }
     const uid = window.muna.session.user.id;
-    const has = window.favs.has(id);
+    const has = favs.has(id);
     if (has) {
-      window.favs.delete(id);
+      favs.delete(id);
       await sb
         .from("favorites")
         .delete()
@@ -492,7 +543,7 @@
         .eq("target_id", id);
       toast("Eliminado de favoritos.");
     } else {
-      window.favs.add(id);
+      favs.add(id);
       await sb.from("favorites").insert({ user_id: uid, target_id: id });
       toast("Agregado a favoritos.");
     }
@@ -503,11 +554,11 @@
   };
 
   window.submitReview = async function submitReview() {
-    if (!window.logged) {
+    if (!logged) {
       window.needLogin("review", "Inicia sesión para reseñar.");
       return;
     }
-    if (!window.reviewRating) {
+    if (!reviewRating) {
       const m = document.getElementById("reviewMsg");
       if (m)
         m.innerHTML =
@@ -521,19 +572,19 @@
           '<div class="msg err">Completa los campos obligatorios para continuar.</div>';
       return;
     }
-    const prod = window.currentModule === "products";
+    const prod = currentModule === "products";
     const item =
-      window.data[window.currentModule].find((x) => x.id === window.currentItemId) ||
-      window.data[window.currentModule][0];
+      data[currentModule].find((x) => x.id === window.currentItemId) ||
+      data[currentModule][0];
     const textarea = document.querySelector("#formBox textarea.req-review");
     const priceSel = document.querySelector("#formBox select.req-review");
     const prosTa = document.querySelectorAll("#formBox textarea.req-review")[1];
     const consTa = document.querySelectorAll("#formBox textarea.req-review")[2];
     const payload = {
-      target_type: window.currentModule,
+      target_type: currentModule,
       target_id: item.id,
       reviewer_user_id: window.muna.session.user.id,
-      r: window.reviewRating,
+      r: reviewRating,
       t: textarea?.value.trim() || "",
     };
     if (prod) {
@@ -548,11 +599,11 @@
     }
     toast("Reseña publicada.");
     await loadAll();
-    window.modulePage(window.currentModule);
+    window.modulePage(currentModule);
   };
 
   window.addCommunityReply = async function addCommunityReply(id) {
-    if (!window.logged) {
+    if (!logged) {
       window.needLogin("reply", "Inicia sesión para responder.");
       return;
     }
@@ -577,7 +628,7 @@
   };
 
   window.addSecondhandComment = async function addSecondhandComment() {
-    if (!window.logged) {
+    if (!logged) {
       window.needLogin("comment", "Inicia sesión para comentar.");
       return;
     }
@@ -586,7 +637,7 @@
       toast("Escribe un comentario para continuar.");
       return;
     }
-    const item = window.data.secondhand.find(
+    const item = data.secondhand.find(
       (x) => x.id === window.currentItemId
     );
     if (!item) return;
@@ -651,7 +702,7 @@
   }
 
   window.submitGeneric = async function submitGeneric(kind) {
-    if (!window.logged) {
+    if (!logged) {
       window.needLogin("create", "Inicia sesión para publicar.");
       return;
     }
@@ -778,7 +829,7 @@
       await sb.from("secondhand_items").insert(payload);
     }
 
-    toast(window.modules[kind].create + " publicado.");
+    toast(modules[kind].create + " publicado.");
     await loadAll();
     window.modulePage(kind);
   };
@@ -789,7 +840,7 @@
 
   window.deletePost = async function deletePost(i) {
     if (!confirm("¿Estás seguro que deseas eliminar?")) return;
-    const p = window.myPosts[i];
+    const p = myPosts[i];
     const tableMap = {
       products: "products",
       community: "community_items",
@@ -809,7 +860,7 @@
   };
 
   window.soldPost = async function soldPost(i) {
-    const p = window.myPosts[i];
+    const p = myPosts[i];
     if (p.module !== "secondhand") return;
     await sb
       .from("secondhand_items")
@@ -825,12 +876,12 @@
    * ============================================================ */
 
   window.contactSeller = async function contactSeller(user, title) {
-    if (!window.logged) {
+    if (!logged) {
       window.needLogin("message", "Inicia sesión para enviar mensajes.");
       return;
     }
     window.show("messages");
-    const ctxItem = window.data.secondhand.find((x) => x.title === title);
+    const ctxItem = data.secondhand.find((x) => x.title === title);
     const sellerAlias = ctxItem?.user || user;
     document.getElementById("chat").innerHTML = `
       <div class="chat-meta">
